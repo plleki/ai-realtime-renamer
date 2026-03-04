@@ -1,0 +1,13 @@
+{
+  "name": "AI Realtime Renamer",
+  "id": "1608835791174304177",
+  "api": "1.0.0",
+  "main": "dist/main.js",
+  "ui": "dist/ui.html",
+  "editorType": ["figma"],
+  "permissions": ["currentuser"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["https://api.anthropic.com"]
+  }
+}

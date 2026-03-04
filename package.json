@@ -1,0 +1,15 @@
+{
+  "name": "ai-realtime-renamer",
+  "version": "1.0.0",
+  "description": "AI-powered Figma layer renamer — real-time, local rules + Claude AI",
+  "scripts": {
+    "build": "node build.js",
+    "watch": "node build.js --watch",
+    "dev": "node build.js --watch"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.90.0",
+    "esbuild": "^0.27.3",
+    "typescript": "^5.0.0"
+  }
+}

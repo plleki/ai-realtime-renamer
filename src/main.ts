@@ -416,17 +416,17 @@ figma.ui.onmessage = async (msg) => {
       await figma.loadFontAsync({ family: 'Inter', style: 'Medium' });
       await figma.loadFontAsync({ family: 'Inter', style: 'Bold' });
 
-      // ── Palette ────────────────────────────────────────────────────────────
-      const BG      = { r: 0.09, g: 0.09, b: 0.11 };
-      const SURFACE = { r: 0.13, g: 0.13, b: 0.16 };
-      const BORDER  = { r: 0.20, g: 0.20, b: 0.24 };
-      const ACCENT  = { r: 0.48, g: 0.38, b: 1.00 };
-      const CYAN    = { r: 0.00, g: 0.76, b: 1.00 };
-      const GREEN   = { r: 0.20, g: 0.78, b: 0.35 };
-      const ORANGE  = { r: 1.00, g: 0.55, b: 0.26 };
-      const TPRI    = { r: 0.94, g: 0.94, b: 0.96 };
-      const TSUB    = { r: 0.60, g: 0.60, b: 0.64 };
-      const TMUT    = { r: 0.38, g: 0.38, b: 0.42 };
+      // ── Palette (light mode) ───────────────────────────────────────────────
+      const BG      = { r: 1.00, g: 1.00, b: 1.00 };   // #FFFFFF
+      const SURFACE = { r: 0.96, g: 0.96, b: 0.97 };   // #F5F5F7
+      const BORDER  = { r: 0.88, g: 0.88, b: 0.89 };   // #E0E0E4
+      const ACCENT  = { r: 0.43, g: 0.33, b: 0.96 };   // #6E54F5  ~4.5:1 on white
+      const CYAN    = { r: 0.00, g: 0.68, b: 0.90 };   // #00ADE6  ~3.5:1
+      const GREEN   = { r: 0.09, g: 0.51, b: 0.21 };   // #188236  ~4.6:1
+      const ORANGE  = { r: 0.68, g: 0.36, b: 0.00 };   // #AD5B00  ~4.5:1
+      const TPRI    = { r: 0.07, g: 0.07, b: 0.08 };   // #111114
+      const TSUB    = { r: 0.42, g: 0.42, b: 0.45 };   // #6B6B72
+      const TMUT    = { r: 0.60, g: 0.60, b: 0.64 };   // #999AA3
       type RGB3 = { r: number; g: number; b: number };
 
       const SEC_ACCENTS = [ACCENT, GREEN, ORANGE];
@@ -966,6 +966,52 @@ figma.ui.onmessage = async (msg) => {
   // ─── Save log history ───────────────────────────────────────────────────────
   if (msg.type === 'saveLog') {
     await figma.clientStorage.setAsync('renameLog', msg.log);
+  }
+
+  // ─── Local Documentation Analyze ─────────────────────────────────────────────
+  if (msg.type === 'localDocAnalyze') {
+    const selection = figma.currentPage.selection;
+    if (!selection.length || !isNamableNode(selection[0])) {
+      figma.ui.postMessage({ type: 'contextProgress', text: '✗ Select a Frame or Component first' });
+      figma.ui.postMessage({ type: 'localDocResult', error: true });
+      return;
+    }
+
+    const root = selection[0] as FrameNode | GroupNode | ComponentNode;
+
+    // ── Phase 1: analyze structure and rename every layer ────────────────────
+    figma.ui.postMessage({ type: 'contextProgress', text: 'Analyzing structure…' });
+    const allNodes: Array<FrameNode | GroupNode | ComponentNode> = [];
+    collectTree(root, allNodes);
+
+    const names: Record<string, string> = {};
+    const typeCounts = new Map<string, number>();
+    for (const node of allNodes) {
+      const name = analyzeNode(node);
+      if (name) {
+        names[node.id] = name;
+        typeCounts.set(name, (typeCounts.get(name) ?? 0) + 1);
+      }
+    }
+
+    figma.ui.postMessage({ type: 'contextProgress', text: 'Renaming layers…' });
+    for (const node of allNodes) {
+      const suggested = names[node.id];
+      if (suggested && suggested !== node.name) {
+        const prevName = node.name;
+        node.name = suggested;
+        figma.ui.postMessage({ type: 'renamed', layerName: suggested, prevName, nodeId: node.id, ai: false });
+      }
+    }
+
+    // ── Phase 2: deep-read screen content and generate documentation ─────────
+    figma.ui.postMessage({ type: 'contextProgress', text: 'Reading screen content…' });
+    const { doc, patternCount, interactionCount } = buildLocalDoc(root, typeCounts, root.name);
+
+    figma.ui.postMessage({ type: 'localDocResult', doc,
+      stats: { totalLayers: Object.keys(names).length, components: patternCount, interactions: interactionCount },
+      screenName: root.name, screenNodeId: root.id,
+    });
   }
 
   // Resize plugin window (for collapse/expand)
@@ -1818,6 +1864,214 @@ async function callClaudeFixSelected(
   });
 }
 
+
+// ─── Local Documentation Generator ───────────────────────────────────────────
+// Analyzes screen structure using the same rule engine as analyzeNode(), then
+// infers a documentation outline — no API key or network call required.
+// buildLocalDoc — called AFTER layers are already renamed.
+// Reads screen text, infers context, and generates documentation without Key Components.
+function buildLocalDoc(
+  root: FrameNode | GroupNode | ComponentNode,
+  typeCounts: Map<string, number>,
+  screenName: string
+): { doc: string; patternCount: number; interactionCount: number } {
+
+  // ── pullText: deep-walk ALL descendants extracting text with metadata ──────
+  interface TextEntry { text: string; fontSize: number; fontWeight: number; parentName: string; }
+
+  function pullText(node: SceneNode, results: TextEntry[]): void {
+    if (node.type === 'TEXT') {
+      const tn = node as TextNode;
+      const chars = tn.characters.trim();
+      if (!chars || chars.length > 300) return;
+      const fs = typeof tn.fontSize   === 'number' ? tn.fontSize   as number : 14;
+      const fw = typeof tn.fontWeight === 'number' ? tn.fontWeight as number : 400;
+      const pName = (tn.parent as SceneNode | null)?.name?.toLowerCase() ?? '';
+      results.push({ text: chars, fontSize: fs, fontWeight: fw, parentName: pName });
+    }
+    if ('children' in node) {
+      for (const child of (node as ChildrenMixin).children) pullText(child as SceneNode, results);
+    }
+  }
+
+  const allTextEntries: TextEntry[] = [];
+  pullText(root as SceneNode, allTextEntries);
+
+  // Classify extracted text into semantic buckets
+  const headingPool: string[] = [];
+  const buttonPool:  string[] = [];
+  const navPool:     string[] = [];
+  const formPool:    string[] = [];
+  const statPool:    string[] = [];
+  const allTextPool: string[] = [];
+
+  for (const { text, fontSize, fontWeight, parentName } of allTextEntries) {
+    allTextPool.push(text);
+    const wordCount = text.trim().split(/\s+/).length;
+    const isHeading = fontSize >= 20 || (fontSize >= 16 && fontWeight >= 600);
+    const isNavCtx  = /nav|tab.?bar|sidebar|menu|bottom.?bar|header/i.test(parentName);
+    const isBtnCtx  = /btn|button|cta|action|primary|secondary|submit|link/i.test(parentName);
+    const isFormCtx = /form|field|input|label|group|row|placeholder/i.test(parentName);
+    const isStat    = /^\$?[\d,.]+[kKmMbB%]?\s*(\/ ?\w+)?$/.test(text.trim()) || /^[+-]?\d+\.?\d*$/.test(text.trim());
+
+    if (isHeading)  headingPool.push(text);
+    if (isNavCtx)   navPool.push(text);
+    else if (isBtnCtx || (wordCount <= 4 && fontWeight >= 500 && fontSize >= 12 && fontSize <= 16 && !isHeading))
+                    buttonPool.push(text);
+    if (isFormCtx)  formPool.push(text);
+    if (isStat)     statPool.push(text);
+  }
+
+  // ── Structural signals from typeCounts ────────────────────────────────────
+  const tc  = (k: string) => typeCounts.get(k) ?? 0;
+  const has = (k: string) => tc(k) > 0;
+
+  const hasNav       = has('Navbar');
+  const hasSidebar   = has('Sidebar');
+  const hasSearch    = has('Search Bar');
+  const hasForm      = has('Form');
+  const hasHero      = has('Hero');
+  const hasTabBar    = has('Tab Bar');
+  const hasToolbar   = has('Toolbar');
+  const hasGrid      = has('Grid');
+  const hasList      = has('List');
+  const statCount    = tc('Stat');
+  const featureCount = tc('Feature');
+  const buttonCount  = tc('Button');
+  const inputCount   = tc('Input');
+  const cardCount    = tc('Card');
+  const itemCount    = tc('List Item');
+  const badgeCount   = tc('Badge');
+
+  const rd = deepAnalyze(root);
+  const hasCheckbox = rd?.hasCheckbox ?? false;
+  const hasToggle   = rd?.hasToggle   ?? false;
+  const hasDropdown = rd?.hasDropdown ?? false;
+  const hasAvatar   = rd?.hasAvatar   ?? false;
+  const hasImage    = rd?.hasImage    ?? false;
+
+  // Count distinct patterns present (for stats card)
+  let patternCount = 0;
+  for (const flag of [hasNav, hasSidebar, hasSearch, hasForm, hasHero, hasTabBar, hasToolbar, hasGrid, hasList,
+                       hasCheckbox, hasToggle, hasDropdown, hasAvatar, hasImage]) {
+    if (flag) patternCount++;
+  }
+  patternCount += (statCount > 0 ? 1 : 0) + (featureCount > 0 ? 1 : 0) + (cardCount > 0 ? 1 : 0) +
+                  (itemCount > 0 ? 1 : 0) + (buttonCount > 0 ? 1 : 0) + (inputCount > 0 ? 1 : 0) + (badgeCount > 0 ? 1 : 0);
+
+  // ── Infer screen purpose using classified text + structural signals ─────────
+  const joined = allTextPool.join(' ').toLowerCase();
+  const kw    = (...words: string[]) => words.some(w => joined.includes(w));
+  const btnKw = (...words: string[]) => buttonPool.some(b => words.some(w => b.toLowerCase().includes(w)));
+  const hdKw  = (...words: string[]) => headingPool.some(h => words.some(w => h.toLowerCase().includes(w)));
+  const topHeading = headingPool[0] ?? '';
+
+  // Build a structural summary line for the second sentence of Screen Purpose
+  const structural: string[] = [];
+  if (hasNav || hasTabBar || hasSidebar) structural.push('navigation');
+  if (hasForm || inputCount >= 2) structural.push('form inputs');
+  if (cardCount >= 2 || itemCount >= 2) structural.push('content cards');
+  if (statCount > 0) structural.push('metric displays');
+  if (hasSearch) structural.push('a search bar');
+  if (featureCount >= 2) structural.push('feature highlights');
+  if (buttonCount > 0) {
+    const labels = [...new Set(buttonPool)].slice(0, 3).join(', ');
+    if (labels) structural.push(`action buttons (${labels})`);
+  }
+  const structuralLine = structural.length > 0
+    ? ` The screen includes ${structural.slice(0, 4).join(', ')}.`
+    : '';
+
+  let purposeCore: string;
+  if ((btnKw('sign in', 'log in', 'login') || btnKw('create account', 'register', 'sign up')) &&
+      (formPool.some(t => /email|password|username/i.test(t)) || inputCount >= 2)) {
+    const authBtn = buttonPool.find(t => /sign in|log in|login/i.test(t)) ?? 'authenticate';
+    const altBtn  = buttonPool.find(t => /create|register|sign up/i.test(t));
+    purposeCore = `The ${screenName} screen allows users to ${authBtn.toLowerCase()} and securely access their account${altBtn ? `, or ${altBtn.toLowerCase()} for a new one` : ''}.`;
+  } else if (kw('get started', 'welcome', 'onboarding', 'let\'s go') || hdKw('get started', 'welcome')) {
+    const headline = topHeading || screenName;
+    purposeCore = `The ${screenName} screen ("${headline}") guides new users through the onboarding process to set up their account.`;
+  } else if (kw('dashboard', 'overview', 'analytics', 'performance', 'revenue', 'metrics', 'kpi') || statCount >= 3) {
+    purposeCore = `The ${screenName} screen is a dashboard providing a high-level view of key metrics and activity, helping users monitor performance at a glance.`;
+  } else if (kw('settings', 'preferences', 'configuration', 'notifications', 'privacy', 'security')) {
+    purposeCore = `The ${screenName} screen lets users configure account preferences and manage personal settings.`;
+  } else if (kw('profile', 'my profile', 'edit profile', 'bio', 'followers', 'following') || hdKw('profile')) {
+    purposeCore = `The ${screenName} screen displays user profile information and allows editing of personal details.`;
+  } else if (kw('checkout', 'payment', 'billing', 'pay now', 'complete order') || btnKw('pay', 'checkout', 'place order')) {
+    purposeCore = `The ${screenName} screen guides users through the checkout process to review their order and complete payment.`;
+  } else if (kw('cart', 'shopping bag', 'wishlist', 'saved items') || btnKw('add to cart', 'remove')) {
+    purposeCore = `The ${screenName} screen shows items added for purchase and allows review before checkout.`;
+  } else if (kw('inbox', 'messages', 'chat', 'conversation') || btnKw('send', 'reply')) {
+    purposeCore = `The ${screenName} screen enables users to view and respond to messages within their conversations.`;
+  } else if (kw('search results', 'no results', 'filter', 'sort by') || (hasSearch && (cardCount >= 2 || itemCount >= 2))) {
+    purposeCore = `The ${screenName} screen presents search results and provides filters to help users find relevant content.`;
+  } else if (kw('notifications', 'alerts', 'activity', 'updates') || hdKw('notifications', 'alerts')) {
+    purposeCore = `The ${screenName} screen displays recent notifications and activity updates for the user.`;
+  } else if (hasHero && featureCount >= 2) {
+    const headline = topHeading ? `"${topHeading}"` : 'its value proposition';
+    purposeCore = `The ${screenName} screen is a landing page showcasing ${headline} and key product features.`;
+  } else if (statCount > 0 && (hasGrid || has('Section'))) {
+    purposeCore = `The ${screenName} screen presents data and key indicators in a structured layout for monitoring and decision-making.`;
+  } else if (hasForm || inputCount >= 3) {
+    const labels = formPool.filter(t => t.split(/\s+/).length <= 4).slice(0, 3).join(', ');
+    purposeCore = labels
+      ? `The ${screenName} screen provides a form for users to enter ${labels} and submit information.`
+      : `The ${screenName} screen provides a form for users to enter and submit information.`;
+  } else if (topHeading) {
+    purposeCore = `The ${screenName} screen ("${topHeading}") provides content and controls for users to complete their goals.`;
+  } else {
+    purposeCore = `The ${screenName} screen provides content and controls for users to complete their goals.`;
+  }
+
+  const purpose = purposeCore + structuralLine;
+
+  // ── Build User Interactions referencing actual button labels ──────────────
+  const ints: string[] = [];
+  const uniqueBtns = [...new Set(buttonPool)];
+  const uniqueNav  = [...new Set(navPool)].filter(t => t.split(/\s+/).length <= 3);
+
+  if (hasSearch) ints.push('Search content: Type in the search bar to filter and discover specific items quickly');
+  if (buttonCount > 0) {
+    const topBtns = uniqueBtns.slice(0, 4).join(', ');
+    ints.push(topBtns
+      ? `Take action: Tap buttons to ${topBtns.toLowerCase()} — each triggers a distinct flow or operation`
+      : 'Trigger actions: Tap buttons to perform operations such as submit, confirm, or navigate');
+  }
+  if (hasForm) {
+    const fields = formPool.filter(t => t.split(/\s+/).length <= 3).slice(0, 4).join(', ');
+    ints.push(fields
+      ? `Submit data: Complete the form — fill in ${fields} — then submit to create or update a record`
+      : 'Submit data: Fill in form fields and submit to create or update a record');
+  } else if (inputCount > 0) {
+    ints.push('Enter information: Type into input fields to provide the required data before proceeding');
+  }
+  if (hasNav || hasTabBar) {
+    const destinations = uniqueNav.slice(0, 4).join(', ');
+    ints.push(destinations
+      ? `Navigate: Use navigation controls to move between ${destinations}`
+      : 'Navigate: Use navigation controls to move between sections of the app');
+  }
+  if (hasSidebar) ints.push('Access sidebar: Open the sidebar to browse navigation options and secondary actions');
+  if (cardCount >= 2 || itemCount >= 2) ints.push('Select items: Tap cards or list rows to open detail views, expand content, or trigger in-line actions');
+  if (hasGrid) ints.push('Browse grid: Scroll through the grid layout and tap items to explore or interact with content');
+  if (hasCheckbox) ints.push('Multi-select: Use checkboxes to select multiple items simultaneously for bulk operations');
+  if (hasToggle) ints.push('Toggle settings: Switch individual options on or off using toggle controls to customise behaviour');
+  if (hasDropdown) ints.push('Filter or sort: Open dropdown menus to apply filters, change sort order, or select configuration options');
+  if (statCount > 0) ints.push('Monitor metrics: Review key numbers, trends, and performance indicators at a glance without leaving the screen');
+  if (hasAvatar) ints.push('Access profiles: Tap user avatars or profile pictures to open the associated user profile or account details');
+  if (hasImage) ints.push('View media: Tap images or media blocks to expand, preview, or interact with visual content');
+  if (badgeCount > 0) ints.push('Read status: Observe status badges and labels to understand the current state or category of each item');
+  if (ints.length === 0) ints.push('Interact with content: Tap and scroll to engage with the screen elements and complete your goal');
+  const finalInts = ints.slice(0, 10);
+
+  // ── Assemble doc string (no Key Components section) ───────────────────────
+  const doc = [
+    '## Screen Purpose', purpose, '',
+    '## User Interactions', finalInts.map(s => `- ${s}`).join('\n'),
+  ].join('\n');
+
+  return { doc, patternCount, interactionCount: finalInts.length };
+}
 
 // ─── Debug Mode ───────────────────────────────────────────────────────────────
 // Enable via figma.clientStorage.setAsync('debug', true) in Figma console.

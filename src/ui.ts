@@ -23,6 +23,7 @@ interface State {
   loadingBtn: string | null;
   // Context tab
   activeTab: 'rename' | 'context';
+  docMode: 'ai' | 'local';
   contextEnabled: boolean;
   contextStatus: string;
   contextSummary: { totalLayers: number; components: number; interactions: number; screenName: string } | null;
@@ -45,6 +46,7 @@ const state: State = {
   isHealthExpanded: false,
   loadingBtn: null,
   activeTab: 'rename',
+  docMode: 'ai',
   contextEnabled: false,
   contextStatus: '',
   contextSummary: null,
@@ -190,20 +192,16 @@ PART 2 — WRITE SCREEN DOCUMENTATION
 Write documentation using exactly this structure (keep ## headings):
 
 ## Screen Purpose
-One clear sentence: what this screen does, who uses it, and when.
-
-## Key Components
-- [Component name]: [what it does, 1 sentence]
-- (list 4-8 main components)
+2-3 sentences: what this screen does, who uses it, when, and what the overall user flow is. Reference actual text/labels from the screen where relevant.
 
 ## User Interactions
-- [Action verb phrase]: [what happens, 1 sentence]
-- (list 4-8 main things the user can do)
+- [Action verb phrase]: [what the user does and what happens as a result — be specific, reference actual buttons/labels from the screen]
+- (list 6-10 interactions the user can perform)
 
 Return ONLY valid JSON, no markdown fences, no explanation:
 {
   "names": { "nodeId": "Layer Name", ... },
-  "doc": "## Screen Purpose\n...\n\n## Key Components\n...\n\n## User Interactions\n..."
+  "doc": "## Screen Purpose\n...\n\n## User Interactions\n..."
 }
 
 Text samples from screen:
@@ -878,6 +876,37 @@ function injectStyles() {
       color: ${state.isDark ? '#FF9A4D' : '#B85000'};
       line-height: 1.5;
     }
+
+    /* Tab bar */
+    .sr-tabs {
+      flex-shrink: 0;
+      display: flex;
+      padding: 10px 0 0;
+      border-bottom: 1px solid ${c.border};
+    }
+    .sr-tab {
+      flex: 1;
+      padding: 7px 12px 8px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: ${c.textSub};
+      transition: color 0.15s, border-color 0.15s;
+      text-align: center;
+      margin-bottom: -1px;
+      letter-spacing: -0.1px;
+    }
+    .sr-tab.active {
+      color: ${c.accent};
+      border-bottom-color: ${c.accent};
+      font-weight: 600;
+    }
+    .sr-tab:hover:not(.active) {
+      color: ${c.text};
+    }
   `;
   document.head.appendChild(style);
 }
@@ -973,136 +1002,118 @@ function renderHealthPanel(c: ReturnType<typeof t>): string {
 
 // ─── Context Panel ───────────────────────────────────────────────────────────
 function renderContextPanel(c: ReturnType<typeof t>): string {
-  const hasKey = state.hasApiKey;
+  const hasKey  = state.hasApiKey;
   const running = state.isContextRunning;
-  const sum = state.contextSummary;
-  const ctxOn = state.contextEnabled;
+  const sum     = state.contextSummary;
+  const ctxOn   = state.contextEnabled;
+  const isLocal = state.docMode === 'local';
 
-  const noKeyWarn = !hasKey ? `
-    <div class="ctx-no-key">
-      ⚠ Give Context requires an API key. Add your Anthropic key in the Rename tab first.
-    </div>` : '';
+  // ── Mode switcher pill ────────────────────────────────────────────────────
+  const modeSwitcher = `
+    <div style="
+      display:flex;gap:3px;padding:3px;
+      background:${c.surface};
+      border:1.5px solid ${c.border};
+      border-radius:10px;
+      margin-bottom:12px;
+      flex-shrink:0;
+    ">
+      <button onclick="handleDocModeSwitch('ai')" style="
+        flex:1;padding:7px 10px;border:none;border-radius:7px;
+        font-size:11px;font-weight:600;cursor:pointer;transition:all 0.15s;
+        background:${!isLocal ? `linear-gradient(135deg,${c.accent},${c.accentEnd})` : 'transparent'};
+        color:${!isLocal ? '#fff' : c.textSub};
+      " aria-pressed="${!isLocal}">✨ AI</button>
+      <button onclick="handleDocModeSwitch('local')" style="
+        flex:1;padding:7px 10px;border:none;border-radius:7px;
+        font-size:11px;font-weight:600;cursor:pointer;transition:all 0.15s;
+        background:${isLocal ? `linear-gradient(135deg,${c.accent},${c.accentEnd})` : 'transparent'};
+        color:${isLocal ? '#fff' : c.textSub};
+      " aria-pressed="${isLocal}">⚡ Local</button>
+    </div>`;
 
-  // Toggle row — own on/off for Give Context, independent of AI Mode
-  const toggleRow = `
+  // ── Description ───────────────────────────────────────────────────────────
+  const description = isLocal
+    ? `<p class="ctx-intro">Analyzes your screen structure using built-in rules — <strong>no API key required</strong>. Generates layer names and a documentation frame locally.</p>`
+    : `<p class="ctx-intro">Select a screen frame, then click <strong>Analyze Screen</strong>. Claude renames all layers with context-aware names and generates a documentation frame above your screen.</p>`;
+
+  // ── AI-only: AI Mode toggle + API key status ──────────────────────────────
+  const aiModeRow = !isLocal ? `
     <div style="
       display:flex;align-items:center;justify-content:space-between;
       padding:11px 13px;
       background:${c.surface};
-      border:1.5px solid ${ctxOn ? c.accent : c.border};
-      border-radius:9px;
-      margin-bottom:12px;
-      transition:border-color 0.15s;
+      border:1.5px solid ${ctxOn && hasKey ? c.accent : c.border};
+      border-radius:9px;margin-bottom:12px;transition:border-color 0.15s;
     ">
       <div>
-        <div style="font-size:12px;font-weight:600;color:${c.text};">Give Context</div>
-        <div style="font-size:10px;color:${c.textSub};margin-top:2px;">
-          ${ctxOn ? 'Active — Claude will analyze &amp; document your screen' : 'Off — toggle to enable'}
+        <div style="font-size:12px;font-weight:600;color:${c.text};">AI Mode</div>
+        <div style="font-size:10px;color:${hasKey ? c.textSub : '#F59E0B'};margin-top:2px;">
+          ${hasKey ? (ctxOn ? 'Active — Claude will analyze &amp; document your screen' : 'Off — toggle to enable') : '⚠ No API key — add one in the Renamer tab'}
         </div>
       </div>
-      <button
-        onclick="handleToggleContext()"
-        ${!hasKey ? 'disabled' : ''}
-        style="
-          width:36px;height:20px;border-radius:10px;position:relative;
-          cursor:${hasKey ? 'pointer' : 'not-allowed'};
-          border:none;outline:none;padding:0;flex-shrink:0;
-          background:${ctxOn && hasKey ? `linear-gradient(135deg,${c.accent},${c.accentEnd})` : c.surfaceHov};
-          opacity:${hasKey ? '1' : '0.4'};
-          box-shadow:${ctxOn ? `0 0 0 3px ${state.isDark ? 'rgba(123,97,255,0.2)' : 'rgba(123,97,255,0.15)'}` : 'none'};
-          transition:all 0.2s;
-        "
-        aria-label="Toggle Give Context"
-        aria-checked="${ctxOn}"
-        role="switch"
-      >
-        <div style="
-          position:absolute;top:2px;
-          left:${ctxOn ? '18px' : '2px'};
-          width:16px;height:16px;
-          background:#fff;border-radius:50%;
-          transition:left 0.15s ease;
-          box-shadow:0 1px 3px rgba(0,0,0,0.3);
-        "></div>
+      <button onclick="handleToggleContext()" ${!hasKey ? 'disabled' : ''} style="
+        width:36px;height:20px;border-radius:10px;position:relative;
+        cursor:${hasKey ? 'pointer' : 'not-allowed'};
+        border:none;outline:none;padding:0;flex-shrink:0;
+        background:${ctxOn && hasKey ? `linear-gradient(135deg,${c.accent},${c.accentEnd})` : c.surfaceHov};
+        opacity:${hasKey ? '1' : '0.4'};
+        box-shadow:${ctxOn && hasKey ? `0 0 0 3px ${state.isDark ? 'rgba(123,97,255,0.2)' : 'rgba(123,97,255,0.15)'}` : 'none'};
+        transition:all 0.2s;
+      " aria-label="Toggle AI Mode" aria-checked="${ctxOn}" role="switch">
+        <div style="position:absolute;top:2px;left:${ctxOn && hasKey ? '18px' : '2px'};width:16px;height:16px;background:#fff;border-radius:50%;transition:left 0.15s ease;box-shadow:0 1px 3px rgba(0,0,0,0.3);"></div>
       </button>
-    </div>`;
+    </div>` : '';
 
-  const spinSvg = `<svg class="spin" width="13" height="13" viewBox="0 0 12 12" fill="none">
-    <circle cx="6" cy="6" r="4.5" stroke="rgba(255,255,255,0.3)" stroke-width="1.5"/>
-    <path d="M6 1.5A4.5 4.5 0 0 1 10.5 6" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
-  </svg>`;
+  // ── Analyze button ─────────────────────────────────────────────────────────
+  const spinSvg = `<svg class="spin" width="13" height="13" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="4.5" stroke="rgba(255,255,255,0.3)" stroke-width="1.5"/><path d="M6 1.5A4.5 4.5 0 0 1 10.5 6" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+  const sparkSvg = `<svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M6.5 1L7.8 5.2H12L8.6 7.8L9.9 12L6.5 9.4L3.1 12L4.4 7.8L1 5.2H5.2L6.5 1Z" stroke="white" stroke-width="1.2" stroke-linejoin="round" fill="rgba(255,255,255,0.15)"/></svg>`;
+  const localSvg = `<svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M6.5 2L11 4.5V8.5L6.5 11L2 8.5V4.5L6.5 2Z" stroke="white" stroke-width="1.2" stroke-linejoin="round" fill="rgba(255,255,255,0.15)"/><circle cx="6.5" cy="6.5" r="1.6" fill="white"/></svg>`;
 
-  const sparkSvg = `<svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-    <path d="M6.5 1L7.8 5.2H12L8.6 7.8L9.9 12L6.5 9.4L3.1 12L4.4 7.8L1 5.2H5.2L6.5 1Z" stroke="white" stroke-width="1.2" stroke-linejoin="round" fill="rgba(255,255,255,0.15)"/>
-  </svg>`;
+  const aiDisabled    = !isLocal && (running || !hasKey || !ctxOn);
+  const localDisabled = isLocal && running;
+  const btnDisabled   = isLocal ? localDisabled : aiDisabled;
+  const btnAction     = isLocal ? (running ? '' : 'handleLocalAnalyze()') : (aiDisabled ? '' : 'handleAnalyzeContext()');
+  const btnLabel      = running
+    ? spinSvg + `<span style="margin-left:2px;">${state.contextStatus || 'Analyzing…'}</span>`
+    : isLocal ? localSvg + ' Analyze Screen' : sparkSvg + ' Analyze Screen';
 
-  // Summary card shown after analysis is complete
+  const analyzeBtn = `
+    <button class="ctx-btn" onclick="${btnAction}" ${btnDisabled ? 'disabled' : ''}
+      aria-label="Analyze screen and generate documentation" aria-busy="${running}">
+      ${btnLabel}
+    </button>`;
+
+  // ── Summary card ──────────────────────────────────────────────────────────
   const summaryCard = sum ? `
-    <div style="
-      margin-top:14px;
-      background:${c.surface};
-      border:1.5px solid ${c.border};
-      border-radius:10px;
-      overflow:hidden;
-    ">
-      <!-- Card header -->
-      <div style="
-        padding:10px 14px 9px;
-        border-bottom:1px solid ${c.border};
-        display:flex;align-items:center;gap:7px;
-      ">
-        <div style="
-          width:6px;height:6px;border-radius:50%;
-          background:linear-gradient(135deg,${c.accent},${c.accentEnd});
-          flex-shrink:0;
-        "></div>
+    <div style="margin-top:14px;background:${c.surface};border:1.5px solid ${c.border};border-radius:10px;overflow:hidden;">
+      <div style="padding:10px 14px 9px;border-bottom:1px solid ${c.border};display:flex;align-items:center;gap:7px;">
+        <div style="width:6px;height:6px;border-radius:50%;background:linear-gradient(135deg,${c.accent},${c.accentEnd});flex-shrink:0;"></div>
         <span style="font-size:11px;font-weight:600;color:${c.text};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${sum.screenName}</span>
         <span style="font-size:9px;font-weight:700;color:${c.success};letter-spacing:0.4px;">DONE</span>
       </div>
-      <!-- Stat row -->
       <div style="display:flex;border-bottom:1px solid ${c.border};">
         <div style="flex:1;padding:10px 12px;border-right:1px solid ${c.border};text-align:center;">
           <div style="font-size:18px;font-weight:700;color:${c.accent};line-height:1;">${sum.totalLayers}</div>
           <div style="font-size:10px;color:${c.textMuted};margin-top:3px;line-height:1.2;">layers<br>renamed</div>
-        </div>
-        <div style="flex:1;padding:10px 12px;border-right:1px solid ${c.border};text-align:center;">
-          <div style="font-size:18px;font-weight:700;color:${c.success};line-height:1;">${sum.components}</div>
-          <div style="font-size:10px;color:${c.textMuted};margin-top:3px;line-height:1.2;">components<br>identified</div>
         </div>
         <div style="flex:1;padding:10px 12px;text-align:center;">
           <div style="font-size:18px;font-weight:700;color:${c.accentAI};line-height:1;">${sum.interactions}</div>
           <div style="font-size:10px;color:${c.textMuted};margin-top:3px;line-height:1.2;">user<br>interactions</div>
         </div>
       </div>
-      <!-- Footer note -->
       <div style="padding:8px 14px;display:flex;align-items:center;gap:5px;">
-        <svg width="9" height="9" viewBox="0 0 9 9" fill="none">
-          <rect x="1" y="1" width="7" height="7" rx="1.5" stroke="${c.textMuted}" stroke-width="1.2"/>
-          <path d="M2.5 3h4M2.5 5h3" stroke="${c.textMuted}" stroke-width="1" stroke-linecap="round"/>
-        </svg>
+        <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><rect x="1" y="1" width="7" height="7" rx="1.5" stroke="${c.textMuted}" stroke-width="1.2"/><path d="M2.5 3h4M2.5 5h3" stroke="${c.textMuted}" stroke-width="1" stroke-linecap="round"/></svg>
         <span style="font-size:10px;color:${c.textMuted};">Documentation frame created above screen</span>
       </div>
     </div>` : '';
 
   return `
     <div class="ctx-wrap" id="panel-context" role="tabpanel" aria-labelledby="tab-context">
-      <p class="ctx-intro">
-        Select a screen frame, then click <strong>Analyze Screen</strong>. Claude will rename all layers with context-aware names and generate a documentation frame directly above your screen.
-      </p>
-      ${toggleRow}
-      ${noKeyWarn}
-      <button
-        class="ctx-btn"
-        onclick="${(running || !hasKey || !ctxOn) ? '' : 'handleAnalyzeContext()'}"
-        ${(running || !hasKey || !ctxOn) ? 'disabled' : ''}
-        aria-label="Analyze screen and generate documentation"
-        aria-busy="${running}"
-        title="${!ctxOn ? 'Toggle Give Context on first' : !hasKey ? 'Add an API key first' : 'Analyze selected screen'}"
-      >
-        ${running
-          ? spinSvg + '<span style="margin-left:2px;">' + (state.contextStatus || 'Analyzing…') + '</span>'
-          : sparkSvg + ' Analyze Screen'}
-      </button>
+      ${modeSwitcher}
+      ${description}
+      ${aiModeRow}
+      ${analyzeBtn}
       ${running ? `<div style="font-size:10px;color:${c.accent};margin-top:8px;text-align:center;font-style:italic;">${state.contextStatus}</div>` : ''}
       ${summaryCard}
     </div>`;
@@ -1226,6 +1237,14 @@ function renderFull() {
           </div>
         </div>
       </header>
+
+      <!-- Tab bar -->
+      <nav class="sr-tabs" role="tablist" aria-label="Plugin sections">
+        <button class="sr-tab ${state.activeTab === 'rename' ? 'active' : ''}" onclick="handleTabSwitch('rename')" role="tab" aria-selected="${state.activeTab === 'rename'}" id="tab-rename">Renamer</button>
+        <button class="sr-tab ${state.activeTab === 'context' ? 'active' : ''}" onclick="handleTabSwitch('context')" role="tab" aria-selected="${state.activeTab === 'context'}" id="tab-context">Documentation</button>
+      </nav>
+
+      ${state.activeTab === 'rename' ? `
 
       <!-- Realtime Renamer — master toggle + AI Mode as nested sub-setting -->
       <div class="sr-section">
@@ -1401,6 +1420,8 @@ function renderFull() {
 
       <!-- Status -->
       <div class="sr-status" aria-live="polite">${state.statusText}</div>
+
+      ` : renderContextPanel(c)}
 
       <!-- Footer -->
       <footer class="sr-footer">
@@ -1690,6 +1711,21 @@ function stopLoading() {
   parent.postMessage({ pluginMessage: { type: 'contextAnalyze' } }, '*');
 };
 
+(window as any).handleDocModeSwitch = (mode: string) => {
+  state.docMode = mode as 'ai' | 'local';
+  state.contextSummary = null;
+  render();
+};
+
+(window as any).handleLocalAnalyze = () => {
+  if (state.isContextRunning) return;
+  state.isContextRunning = true;
+  state.contextStatus = 'Analyzing layers…';
+  state.contextSummary = null;
+  render();
+  parent.postMessage({ pluginMessage: { type: 'localDocAnalyze' } }, '*');
+};
+
 // ─── Messages from Plugin ─────────────────────────────────────────────────────
 window.onmessage = async (event) => {
   const msg = event.data.pluginMessage;
@@ -1832,10 +1868,9 @@ window.onmessage = async (event) => {
 
       // Count bullet items per section for stats
       const secParts = result.doc.split('## ');
-      let compCount = 0; let intCount = 0;
+      let intCount = 0;
       for (const part of secParts) {
         const bullets = (part.match(/^[-•*]/gm) || []).length;
-        if (part.startsWith('Key Components')) compCount = bullets;
         if (part.startsWith('User Interactions')) intCount = bullets;
       }
       const nameCount = Object.keys(result.names).length;
@@ -1865,7 +1900,7 @@ window.onmessage = async (event) => {
           screenNodeId,
           stats: {
             totalLayers: nameCount,
-            components: compCount || 5,
+            components: 0,
             interactions: intCount || 4,
           },
         },
@@ -1897,6 +1932,27 @@ window.onmessage = async (event) => {
     } catch {
       parent.postMessage({ pluginMessage: { type: 'aiResponse', id: msg.id, name: null } }, '*');
     }
+  }
+
+  if (msg.type === 'localDocResult') {
+    if (msg.error) {
+      state.isContextRunning = false;
+      state.contextStatus = '✗ Select a frame first';
+      render();
+      setTimeout(() => { state.contextStatus = ''; render(); }, 3000);
+      return;
+    }
+    state.contextStatus = 'Building documentation frame…';
+    render();
+    parent.postMessage({
+      pluginMessage: {
+        type: 'contextBuildDocFrame',
+        doc: msg.doc,
+        screenName: msg.screenName,
+        screenNodeId: msg.screenNodeId,
+        stats: msg.stats,
+      },
+    }, '*');
   }
 
   if (msg.type === 'aiAnalyzeBatch') {
